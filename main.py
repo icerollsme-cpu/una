@@ -2,6 +2,8 @@
 """
 SEO Optimization Agent — Entry Point
 
+Powered by: Kimi K2 (NVIDIA NIM) · SerpAPI · scrape.do · scrapestack · ScrapeGraphAI
+
 Usage:
     python main.py input.csv
     python main.py input.csv -o my_report.xlsx
