@@ -10,17 +10,13 @@ Mastodon   Mastodon.py      instance URL + email + password
 Twitter/X  twikit           username + email + password  (unofficial)
 Instagram  instagrapi       username + password           (unofficial)
 Threads    threads-net      Instagram username + password (unofficial)
-Reddit     praw             username + password + free script-app credentials
+Reddit     requests         username + password only (old.reddit.com cookie login)
 LinkedIn   linkedin-api     email + password              (unofficial voyager API)
 TikTok     tiktok-uploader  sessionid cookie from browser (Selenium)
 
 NOTE: twikit, instagrapi, threads-net, and linkedin-api use unofficial /
 reverse-engineered APIs. They work without paid API registration but may
 violate each platform's ToS and can break if internals change.
-
-Reddit: create a free "script" app at reddit.com/prefs/apps (30 sec, no
-approval) to get the client_id and client_secret — those are not paid API
-credentials, just a free app identifier.
 
 TikTok: log in at tiktok.com in Chrome/Firefox → DevTools → Application →
 Cookies → copy the `sessionid` value into TIKTOK_SESSION_ID in your .env.
@@ -249,10 +245,9 @@ def post_threads(text: str, image_path: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Reddit — praw (free script-type OAuth app, no approval required)
-# Create a free "script" app in 30 sec at reddit.com/prefs/apps to get the
-# client_id and client_secret — these are not paid credentials.
-# Combined with your Reddit username + password that's everything needed.
+# Reddit — pure requests, cookie-based login (no OAuth app, no client_id)
+# Uses old.reddit.com/api/login to get a session cookie + modhash, then
+# submits via reddit.com/api/submit. Only your username and password needed.
 # ---------------------------------------------------------------------------
 
 def post_reddit(
@@ -261,26 +256,52 @@ def post_reddit(
     text: Optional[str] = None,
     link_url: Optional[str] = None,
 ) -> dict:
-    """Submit a text or link post to a subreddit."""
-    _check_deps("praw")
-    import praw
+    """Submit a text or link post to Reddit using username and password only."""
+    import requests as _req
 
-    reddit = praw.Reddit(
-        client_id=_env("REDDIT_CLIENT_ID", required=True),
-        client_secret=_env("REDDIT_CLIENT_SECRET", required=True),
-        username=_env("REDDIT_USERNAME", required=True),
-        password=_env("REDDIT_PASSWORD", required=True),
-        user_agent=_env("REDDIT_USER_AGENT") or "una-social-poster/1.0",
+    username = _env("REDDIT_USERNAME", required=True)
+    password = _env("REDDIT_PASSWORD", required=True)
+
+    session = _req.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+    })
+
+    # Step 1: cookie-based login — no OAuth app or client_id required
+    login = session.post(
+        "https://old.reddit.com/api/login",
+        data={"user": username, "passwd": password, "api_type": "json", "rem": "false"},
+        timeout=30,
     )
+    login.raise_for_status()
+    login_json = login.json().get("json", {})
+    if login_json.get("errors"):
+        raise RuntimeError(f"Reddit login failed: {login_json['errors']}")
+    modhash = login_json["data"]["modhash"]
 
-    sub = reddit.subreddit(subreddit)
-    if link_url:
-        submission = sub.submit_link(title=title, url=link_url)
-    else:
-        submission = sub.submit(title=title, selftext=text or "")
+    # Step 2: submit the post
+    submit = session.post(
+        "https://www.reddit.com/api/submit",
+        data={
+            "sr": subreddit,
+            "kind": "link" if link_url else "self",
+            "title": title,
+            "url": link_url or "",
+            "text": text or "",
+            "uh": modhash,
+            "api_type": "json",
+            "resubmit": "true",
+        },
+        timeout=30,
+    )
+    submit.raise_for_status()
+    submit_json = submit.json().get("json", {})
+    if submit_json.get("errors"):
+        raise RuntimeError(f"Reddit submit failed: {submit_json['errors']}")
 
-    log.info("Reddit post submitted: %s", submission.shortlink)
-    return {"platform": "reddit", "url": submission.shortlink, "id": submission.id}
+    post_url = submit_json["data"]["url"]
+    log.info("Reddit post submitted: %s", post_url)
+    return {"platform": "reddit", "url": post_url}
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +409,7 @@ PLATFORM_MAP = {
     ),
     "threads": lambda text, img, **kw: post_threads(text, img),
     "reddit": lambda text, img, **kw: post_reddit(
-        kw.get("subreddit") or _env("REDDIT_DEFAULT_SUBREDDIT", required=True),
+        kw.get("subreddit") or _env("REDDIT_DEFAULT_SUBREDDIT") or "test",
         kw.get("title") or text[:100],
         text,
         kw.get("link_url"),
