@@ -12,4 +12,14 @@ twikit>=2.3.0            # Twitter/X (username + email + password, unofficial)
 instagrapi>=2.1.2        # Instagram (username + password, unofficial)
 threads-net>=0.1.0       # Threads (Instagram credentials, unofficial)
 linkedin-api>=2.0.0      # LinkedIn (email + password, unofficial voyager API)
-tiktok-uploader>=1.0.0   # TikTok (sessionid cookie + Selenium; needs chromedriver)
+tiktok-uploader>=1.0.0   # TikTok (email + password, Selenium; needs chromedriver)
+
+# ── Scraper agent (scraper_agent.py) ─────────────────────────────────────────
+TikTokApi>=6.3.0         # TikTok scraping (unofficial, Playwright)
+yt-dlp>=2024.1.1         # YouTube scraping + search
+
+# ── Content agent (content_agent.py) ─────────────────────────────────────────
+matplotlib>=3.8.0        # Graph / chart generation
+moviepy>=1.0.3           # Video assembly from image slides
+Pillow>=10.0.0           # Image processing and text overlays
+# Images generated via Pollinations.ai (free, no key) — uses requests (already listed)
