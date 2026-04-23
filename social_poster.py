@@ -3,16 +3,17 @@ social_poster.py — Login-only social media posting. No API keys, no developer
 portals, no paid services. Each platform authenticates with your account
 username and password only.
 
-Platform   Library          Credentials
-──────────────────────────────────────────────────────────────────
-Bluesky    atproto          handle + app-password (Settings → App Passwords)
-Mastodon   Mastodon.py      instance URL + email + password
-Twitter/X  twikit           username + email + password  (unofficial)
-Instagram  instagrapi       username + password           (unofficial)
-Threads    threads-net      Instagram username + password (unofficial)
-Reddit     requests         username + password only (old.reddit.com cookie login)
-LinkedIn   linkedin-api     email + password              (unofficial voyager API)
-TikTok     tiktok-uploader  email + password (Selenium)
+Platform   Library                  Credentials
+────────────────────────────────────────────────────────────────────────
+Bluesky    atproto                  handle + app-password (Settings → App Passwords)
+Mastodon   Mastodon.py              instance URL + email + password
+Twitter/X  twikit                   username + email + password  (unofficial)
+Instagram  instagrapi               username + password           (unofficial)
+Threads    threads-net              Instagram username + password (unofficial)
+Reddit     requests                 username + password only (old.reddit.com cookie login)
+LinkedIn   linkedin-api             email + password              (unofficial voyager API)
+TikTok     tiktok-uploader          email + password (Selenium)
+YouTube    undetected-chromedriver  Google email + password (Selenium, YouTube Studio)
 
 NOTE: twikit, instagrapi, threads-net, and linkedin-api use unofficial /
 reverse-engineered APIs. They work without paid API registration but may
@@ -394,6 +395,156 @@ def post_tiktok(description: str, video_path: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# YouTube — undetected-chromedriver (Selenium, Google email + password)
+# No API registration. Logs into Google and uploads via YouTube Studio.
+# Requires: Chrome + chromedriver installed and versions matched.
+# NOTE: YouTube only supports video posts. Google may prompt for 2-step
+# verification — disable it or use a dedicated Google account for this.
+# ---------------------------------------------------------------------------
+
+def post_youtube(
+    title: str,
+    description: str,
+    video_path: Optional[str] = None,
+    tags: Optional[list] = None,
+) -> dict:
+    """Upload a video to YouTube using Google email and password."""
+    _check_deps("undetected_chromedriver")
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    if not video_path:
+        raise ValueError("YouTube requires a video file — pass video_path or --video")
+
+    email = _env("YOUTUBE_EMAIL", required=True)
+    password = _env("YOUTUBE_PASSWORD", required=True)
+
+    opts = uc.ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+
+    driver = uc.Chrome(options=opts)
+    wait = WebDriverWait(driver, 45)
+
+    try:
+        # ── Step 1: Google login ──────────────────────────────────────────────
+        driver.get("https://accounts.google.com/signin/v2/identifier")
+        wait.until(EC.presence_of_element_located((By.ID, "identifierId")))
+        driver.find_element(By.ID, "identifierId").send_keys(email)
+        driver.find_element(By.ID, "identifierNext").click()
+
+        wait.until(EC.visibility_of_element_located((By.NAME, "Passwd")))
+        driver.find_element(By.NAME, "Passwd").send_keys(password)
+        driver.find_element(By.ID, "passwordNext").click()
+        time.sleep(5)
+
+        # ── Step 2: YouTube Studio ────────────────────────────────────────────
+        driver.get("https://studio.youtube.com")
+        time.sleep(4)
+
+        # Create → Upload videos
+        create_btn = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "#create-icon, ytcp-button#create-icon")
+        ))
+        create_btn.click()
+
+        upload_opt = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "tp-yt-paper-item#upload-beta, [test-id='upload-beta']")
+        ))
+        upload_opt.click()
+
+        # ── Step 3: File upload ───────────────────────────────────────────────
+        file_input = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "input#content[type='file'], input[type='file']")
+        ))
+        file_input.send_keys(os.path.abspath(video_path))
+        log.info("YouTube: file selected, waiting for metadata form…")
+
+        # ── Step 4: Title ─────────────────────────────────────────────────────
+        title_box = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "#textbox[aria-label*='title' i], #title #textbox")
+        ))
+        title_box.click()
+        title_box.send_keys(Keys.CONTROL + "a")
+        title_box.send_keys(title)
+
+        # ── Step 5: Description ───────────────────────────────────────────────
+        try:
+            desc_box = driver.find_element(
+                By.CSS_SELECTOR,
+                "#description-textarea #textbox, #textbox[aria-label*='description' i]",
+            )
+            desc_box.click()
+            desc_box.send_keys(description)
+        except Exception:
+            pass
+
+        # ── Step 6: Tags (via More Options) ──────────────────────────────────
+        if tags:
+            try:
+                more = driver.find_element(
+                    By.CSS_SELECTOR, "#toggle-button, [aria-label*='more options' i]"
+                )
+                more.click()
+                time.sleep(1)
+                tags_input = driver.find_element(
+                    By.CSS_SELECTOR, "input#tags-input, ytcp-chip-bar input"
+                )
+                for tag in (tags or [])[:15]:
+                    tags_input.send_keys(tag + ",")
+            except Exception:
+                pass
+
+        # ── Step 7: Navigate Next × 3 ────────────────────────────────────────
+        for _ in range(3):
+            next_btn = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#next-button")
+            ))
+            next_btn.click()
+            time.sleep(2)
+
+        # ── Step 8: Set visibility to Public ─────────────────────────────────
+        public_radio = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "tp-yt-paper-radio-button[name='PUBLIC']")
+        ))
+        public_radio.click()
+
+        # ── Step 9: Wait for upload to finish then Save ───────────────────────
+        for _ in range(60):          # up to 10 minutes
+            src = driver.page_source
+            if "Upload complete" in src or "Processing will begin" in src:
+                break
+            time.sleep(10)
+
+        done_btn = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "#done-button")
+        ))
+        done_btn.click()
+        time.sleep(4)
+
+        # Try to grab the published video URL from the success dialog
+        video_url = "https://studio.youtube.com"
+        try:
+            link_el = driver.find_element(
+                By.CSS_SELECTOR, ".ytcp-video-info a, a[href*='youtube.com/watch']"
+            )
+            video_url = link_el.get_attribute("href") or video_url
+        except Exception:
+            pass
+
+        log.info("YouTube video uploaded: %s", video_url)
+        return {"platform": "youtube", "title": title, "url": video_url, "status": "uploaded"}
+
+    finally:
+        driver.quit()
+
+
+# ---------------------------------------------------------------------------
 # Convenience: broadcast to multiple platforms at once
 # ---------------------------------------------------------------------------
 
@@ -414,6 +565,12 @@ PLATFORM_MAP = {
     "linkedin": lambda text, img, **kw: post_linkedin(text),
     "tiktok": lambda text, img, **kw: post_tiktok(
         text, kw.get("video_path") or img
+    ),
+    "youtube": lambda text, img, **kw: post_youtube(
+        title=kw.get("title") or text[:100],
+        description=text,
+        video_path=kw.get("video_path") or img,
+        tags=kw.get("tags"),
     ),
 }
 

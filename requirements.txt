@@ -13,6 +13,7 @@ instagrapi>=2.1.2        # Instagram (username + password, unofficial)
 threads-net>=0.1.0       # Threads (Instagram credentials, unofficial)
 linkedin-api>=2.0.0      # LinkedIn (email + password, unofficial voyager API)
 tiktok-uploader>=1.0.0   # TikTok (email + password, Selenium; needs chromedriver)
+undetected-chromedriver>=3.5.0  # YouTube (Google login bypass for Selenium)
 
 # ── Scraper agent (scraper_agent.py) ─────────────────────────────────────────
 TikTokApi>=6.3.0         # TikTok scraping (unofficial, Playwright)
@@ -23,3 +24,9 @@ matplotlib>=3.8.0        # Graph / chart generation
 moviepy>=1.0.3           # Video assembly from image slides
 Pillow>=10.0.0           # Image processing and text overlays
 # Images generated via Pollinations.ai (free, no key) — uses requests (already listed)
+
+# ── Analytics agent (analytics_agent.py) ─────────────────────────────────────
+google-analytics-data>=0.18.0   # GA4 Data API (free; needs service-account key)
+
+# ── Site analyzer (site_analyzer.py) ─────────────────────────────────────────
+# Uses requests + beautifulsoup4 + lxml (all already listed above)
