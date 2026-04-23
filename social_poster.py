@@ -3,17 +3,29 @@ social_poster.py — Login-only social media posting. No API keys, no developer
 portals, no paid services. Each platform authenticates with your account
 username and password only.
 
-Platform   Library        Credentials
-────────────────────────────────────────────────────────
-Bluesky    atproto        handle + app-password (Settings → App Passwords)
-Mastodon   Mastodon.py    instance URL + email + password
-Twitter/X  twikit         username + email + password  (unofficial cookie session)
-Instagram  instagrapi     username + password           (unofficial mobile API)
-Threads    threads-net    Instagram username + password (unofficial)
+Platform   Library          Credentials
+──────────────────────────────────────────────────────────────────
+Bluesky    atproto          handle + app-password (Settings → App Passwords)
+Mastodon   Mastodon.py      instance URL + email + password
+Twitter/X  twikit           username + email + password  (unofficial)
+Instagram  instagrapi       username + password           (unofficial)
+Threads    threads-net      Instagram username + password (unofficial)
+Reddit     praw             username + password + free script-app credentials
+LinkedIn   linkedin-api     email + password              (unofficial voyager API)
+TikTok     tiktok-uploader  sessionid cookie from browser (Selenium)
 
-NOTE: twikit, instagrapi, and threads-net use unofficial / reverse-engineered
-APIs. They work without any API registration but may violate each platform's
-ToS and can break if the platform changes its internals.
+NOTE: twikit, instagrapi, threads-net, and linkedin-api use unofficial /
+reverse-engineered APIs. They work without paid API registration but may
+violate each platform's ToS and can break if internals change.
+
+Reddit: create a free "script" app at reddit.com/prefs/apps (30 sec, no
+approval) to get the client_id and client_secret — those are not paid API
+credentials, just a free app identifier.
+
+TikTok: log in at tiktok.com in Chrome/Firefox → DevTools → Application →
+Cookies → copy the `sessionid` value into TIKTOK_SESSION_ID in your .env.
+tiktok-uploader drives a headless browser, so Chrome + chromedriver must be
+installed.
 """
 
 import asyncio
@@ -237,6 +249,133 @@ def post_threads(text: str, image_path: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Reddit — praw (free script-type OAuth app, no approval required)
+# Create a free "script" app in 30 sec at reddit.com/prefs/apps to get the
+# client_id and client_secret — these are not paid credentials.
+# Combined with your Reddit username + password that's everything needed.
+# ---------------------------------------------------------------------------
+
+def post_reddit(
+    subreddit: str,
+    title: str,
+    text: Optional[str] = None,
+    link_url: Optional[str] = None,
+) -> dict:
+    """Submit a text or link post to a subreddit."""
+    _check_deps("praw")
+    import praw
+
+    reddit = praw.Reddit(
+        client_id=_env("REDDIT_CLIENT_ID", required=True),
+        client_secret=_env("REDDIT_CLIENT_SECRET", required=True),
+        username=_env("REDDIT_USERNAME", required=True),
+        password=_env("REDDIT_PASSWORD", required=True),
+        user_agent=_env("REDDIT_USER_AGENT") or "una-social-poster/1.0",
+    )
+
+    sub = reddit.subreddit(subreddit)
+    if link_url:
+        submission = sub.submit_link(title=title, url=link_url)
+    else:
+        submission = sub.submit(title=title, selftext=text or "")
+
+    log.info("Reddit post submitted: %s", submission.shortlink)
+    return {"platform": "reddit", "url": submission.shortlink, "id": submission.id}
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn — linkedin-api (unofficial, email + password login)
+# After login the library exposes an authenticated requests.Session which is
+# used here to POST directly to LinkedIn's internal voyager/ugcPosts endpoint.
+# GitHub: https://github.com/tomquirk/linkedin-api  License: MIT
+# ---------------------------------------------------------------------------
+
+def post_linkedin(text: str) -> dict:
+    """Post to your LinkedIn profile feed using email and password."""
+    _check_deps("linkedin_api")
+    from linkedin_api import Linkedin
+
+    api = Linkedin(
+        _env("LINKEDIN_EMAIL", required=True),
+        _env("LINKEDIN_PASSWORD", required=True),
+    )
+
+    # Resolve the current user's numeric person ID from the voyager /me endpoint
+    me = api.client.session.get(
+        "https://www.linkedin.com/voyager/api/me",
+        headers={"accept": "application/vnd.linkedin.normalized+json+2.1"},
+    )
+    me.raise_for_status()
+    person_id = me.json().get("plainId")
+    if not person_id:
+        raise RuntimeError("Could not resolve LinkedIn person ID from session")
+
+    # JSESSIONID (without surrounding quotes) serves as the CSRF token
+    csrf = api.client.session.cookies.get("JSESSIONID", "").strip('"')
+
+    payload = {
+        "author": f"urn:li:person:{person_id}",
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {"text": text},
+                "shareMediaCategory": "NONE",
+            }
+        },
+        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+    }
+
+    resp = api.client.session.post(
+        "https://www.linkedin.com/voyager/api/ugcPosts",
+        json=payload,
+        headers={
+            "X-RestLi-Protocol-Version": "2.0.0",
+            "csrf-token": csrf,
+        },
+    )
+    resp.raise_for_status()
+    post_id = resp.headers.get("x-restli-id", "")
+    log.info("LinkedIn post created: %s", post_id)
+    return {"platform": "linkedin", "post_id": post_id}
+
+
+# ---------------------------------------------------------------------------
+# TikTok — tiktok-uploader (Selenium, sessionid cookie from browser)
+# No API registration. Log in to tiktok.com in Chrome/Firefox, then copy the
+# `sessionid` cookie value (DevTools → Application → Cookies) into your .env.
+# Requires: Chrome or Firefox + matching chromedriver/geckodriver installed.
+# GitHub: https://github.com/wkaisertexas/tiktok-uploader  License: MIT
+# NOTE: TikTok only supports video posts — images/text-only are not available.
+# ---------------------------------------------------------------------------
+
+def post_tiktok(description: str, video_path: Optional[str] = None) -> dict:
+    """Upload a video to TikTok using your browser sessionid cookie."""
+    _check_deps("tiktok_uploader")
+    from tiktok_uploader.upload import upload_video
+
+    if not video_path:
+        raise ValueError("TikTok requires a video file — pass video_path or --video")
+
+    session_id = _env("TIKTOK_SESSION_ID", required=True)
+    browser = _env("TIKTOK_BROWSER") or "chrome"
+
+    failed = upload_video(
+        filename=video_path,
+        description=description,
+        sessionid=session_id,
+        browser=browser,
+        headless=True,
+        num_retries=2,
+    )
+
+    if failed:
+        raise RuntimeError(f"TikTok upload failed: {failed}")
+
+    log.info("TikTok video uploaded: %s", video_path)
+    return {"platform": "tiktok", "video": video_path, "status": "uploaded"}
+
+
+# ---------------------------------------------------------------------------
 # Convenience: broadcast to multiple platforms at once
 # ---------------------------------------------------------------------------
 
@@ -248,6 +387,16 @@ PLATFORM_MAP = {
         text, kw.get("image_path") or img, kw.get("video_path")
     ),
     "threads": lambda text, img, **kw: post_threads(text, img),
+    "reddit": lambda text, img, **kw: post_reddit(
+        kw.get("subreddit") or _env("REDDIT_DEFAULT_SUBREDDIT", required=True),
+        kw.get("title") or text[:100],
+        text,
+        kw.get("link_url"),
+    ),
+    "linkedin": lambda text, img, **kw: post_linkedin(text),
+    "tiktok": lambda text, img, **kw: post_tiktok(
+        text, kw.get("video_path") or img
+    ),
 }
 
 
@@ -307,12 +456,21 @@ if __name__ == "__main__":
         help=f"Platforms to post to. Choices: {', '.join(PLATFORM_MAP)}",
     )
     parser.add_argument("--image", dest="image_path", help="Local image file (optional)")
-    parser.add_argument("--video", dest="video_path", help="Local video file (Instagram only)")
+    parser.add_argument("--video", dest="video_path", help="Local video file (Instagram, TikTok)")
+    parser.add_argument("--subreddit", help="Subreddit to post to (Reddit)")
+    parser.add_argument("--title", help="Post title (Reddit; defaults to first 100 chars of text)")
+    parser.add_argument("--link-url", dest="link_url", help="Link URL for Reddit link posts")
     args = parser.parse_args()
 
     kwargs = {}
     if args.video_path:
         kwargs["video_path"] = args.video_path
+    if args.subreddit:
+        kwargs["subreddit"] = args.subreddit
+    if args.title:
+        kwargs["title"] = args.title
+    if args.link_url:
+        kwargs["link_url"] = args.link_url
 
     results = post_to_platforms(args.text, args.platforms, args.image_path, **kwargs)
     print(json.dumps(results, indent=2))
