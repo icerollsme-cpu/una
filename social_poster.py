@@ -1,20 +1,22 @@
 """
-social_poster.py — Free multi-platform social media posting module.
+social_poster.py — Login-only social media posting. No API keys, no developer
+portals, no paid services. Each platform authenticates with your account
+username and password only.
 
-Supported platforms and their free-tier libraries:
-  - Bluesky       (AT Protocol — zero cost, no approval needed)
-  - Mastodon      (fully open, self-hostable)
-  - X / Twitter   (Tweepy — 500 posts/month free)
-  - Reddit        (PRAW — free for non-commercial)
-  - LinkedIn      (REST API — free with "Share on LinkedIn" product approval)
-  - Facebook Page (Graph API — free with App Review)
-  - Instagram     (Graph API — free with App Review)
-  - Threads       (Graph API — free, 250 posts/day)
+Platform   Library        Credentials
+────────────────────────────────────────────────────────
+Bluesky    atproto        handle + app-password (Settings → App Passwords)
+Mastodon   Mastodon.py    instance URL + email + password
+Twitter/X  twikit         username + email + password  (unofficial cookie session)
+Instagram  instagrapi     username + password           (unofficial mobile API)
+Threads    threads-net    Instagram username + password (unofficial)
 
-All credentials are loaded from environment variables. See .env.example for
-the full list of keys required per platform.
+NOTE: twikit, instagrapi, and threads-net use unofficial / reverse-engineered
+APIs. They work without any API registration but may violate each platform's
+ToS and can break if the platform changes its internals.
 """
 
+import asyncio
 import os
 import time
 import logging
@@ -39,110 +41,129 @@ def _check_deps(*packages: str) -> None:
     missing = [p for p in packages if not importlib.util.find_spec(p)]
     if missing:
         raise ImportError(
-            f"Install missing packages first: pip install {' '.join(missing)}"
+            f"Install missing packages: pip install {' '.join(missing)}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Bluesky (AT Protocol) — https://docs.bsky.app
-# Free: unlimited, no API key, no approval required.
-# Auth: App Password created at bsky.social → Settings → App Passwords
+# No API registration. Create an App Password at:
+#   bsky.app → Settings → Privacy and Security → App Passwords
+# App passwords are scoped account passwords — not a developer API credential.
 # ---------------------------------------------------------------------------
 
 def post_bluesky(text: str, image_path: Optional[str] = None) -> dict:
-    """Post to Bluesky. Returns the created post URI."""
+    """Post to Bluesky using your handle and an app-specific password."""
     _check_deps("atproto")
-    from atproto import Client, client_utils
-
-    handle = _env("BLUESKY_HANDLE", required=True)
-    app_password = _env("BLUESKY_APP_PASSWORD", required=True)
+    from atproto import Client
 
     client = Client()
-    client.login(handle, app_password)
+    client.login(
+        _env("BLUESKY_HANDLE", required=True),
+        _env("BLUESKY_APP_PASSWORD", required=True),
+    )
 
     if image_path:
-        with open(image_path, "rb") as f:
-            img_data = f.read()
-        upload = client.upload_blob(img_data)
+        with open(image_path, "rb") as fh:
+            blob = client.upload_blob(fh.read()).blob
         embed = {
             "$type": "app.bsky.embed.images",
-            "images": [{"image": upload.blob, "alt": ""}],
+            "images": [{"image": blob, "alt": ""}],
         }
-        response = client.send_post(text=text, embed=embed)
+        resp = client.send_post(text=text, embed=embed)
     else:
-        response = client.send_post(text=text)
+        resp = client.send_post(text=text)
 
-    log.info("Bluesky post created: %s", response.uri)
-    return {"platform": "bluesky", "uri": response.uri}
+    log.info("Bluesky post created: %s", resp.uri)
+    return {"platform": "bluesky", "uri": resp.uri}
 
 
 # ---------------------------------------------------------------------------
 # Mastodon — https://docs.joinmastodon.org/api/
-# Free: 300 req/5 min, open source, self-hostable.
-# Auth: OAuth 2.0; register your app on your instance to get access token.
+# No pre-registration needed. The app registers itself on the instance the
+# first time using Mastodon.create_app(), then logs in with your credentials.
 # ---------------------------------------------------------------------------
 
 def post_mastodon(text: str, image_path: Optional[str] = None) -> dict:
-    """Post a toot to Mastodon. Returns the status URL."""
+    """Post to Mastodon using your instance URL, email, and password."""
     _check_deps("mastodon")
     from mastodon import Mastodon
 
     instance_url = _env("MASTODON_INSTANCE_URL", required=True)
-    access_token = _env("MASTODON_ACCESS_TOKEN", required=True)
+    email = _env("MASTODON_EMAIL", required=True)
+    password = _env("MASTODON_PASSWORD", required=True)
 
-    mastodon = Mastodon(access_token=access_token, api_base_url=instance_url)
+    # Register the app on the instance (returns client_id, client_secret)
+    client_id, client_secret = Mastodon.create_app(
+        "una-social-poster",
+        api_base_url=instance_url,
+        scopes=["read", "write"],
+    )
+
+    mastodon = Mastodon(
+        client_id=client_id,
+        client_secret=client_secret,
+        api_base_url=instance_url,
+    )
+    access_token = mastodon.log_in(email, password, scopes=["read", "write"])
+
+    client = Mastodon(access_token=access_token, api_base_url=instance_url)
 
     media_ids = []
     if image_path:
-        media = mastodon.media_post(image_path)
-        # Wait for media processing
+        media = client.media_post(image_path)
         for _ in range(10):
-            info = mastodon.media(media["id"])
+            info = client.media(media["id"])
             if info.get("url"):
                 break
             time.sleep(2)
         media_ids = [media["id"]]
 
-    status = mastodon.status_post(text, media_ids=media_ids or None)
+    status = client.status_post(text, media_ids=media_ids or None)
     log.info("Mastodon toot posted: %s", status["url"])
     return {"platform": "mastodon", "url": status["url"], "id": status["id"]}
 
 
 # ---------------------------------------------------------------------------
-# X / Twitter — https://docs.x.com
-# Free: 500 tweets/month, 17 POST req/24h per user token (v2).
-# Auth: OAuth 2.0 PKCE (user-context) or OAuth 1.0a.
+# Twitter / X — twikit (unofficial, cookie-based session)
+# No API keys. Logs in with username + email + password.
+# GitHub: https://github.com/d60/twikit  Stars: 4,300+  License: MIT
 # ---------------------------------------------------------------------------
 
-def post_twitter(text: str, image_path: Optional[str] = None) -> dict:
-    """Post a tweet via Tweepy (OAuth 1.0a user auth). Returns tweet ID."""
-    _check_deps("tweepy")
-    import tweepy
+async def _twikit_post(
+    username: str, email: str, password: str,
+    text: str, image_path: Optional[str],
+) -> str:
+    from twikit import Client
 
-    api_key = _env("TWITTER_API_KEY", required=True)
-    api_secret = _env("TWITTER_API_SECRET", required=True)
-    access_token = _env("TWITTER_ACCESS_TOKEN", required=True)
-    access_secret = _env("TWITTER_ACCESS_TOKEN_SECRET", required=True)
-
-    # v1.1 client used only for media upload; v2 client for tweets
-    auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_secret)
-    api_v1 = tweepy.API(auth)
-    client_v2 = tweepy.Client(
-        consumer_key=api_key,
-        consumer_secret=api_secret,
-        access_token=access_token,
-        access_token_secret=access_secret,
-    )
+    client = Client("en-US")
+    await client.login(auth_info_1=username, auth_info_2=email, password=password)
 
     media_ids = []
     if image_path:
-        media = api_v1.media_upload(image_path)
-        media_ids = [media.media_id]
+        with open(image_path, "rb") as fh:
+            data = fh.read()
+        ext = os.path.splitext(image_path)[1].lower()
+        mime = "image/gif" if ext == ".gif" else "image/png" if ext == ".png" else "image/jpeg"
+        media = await client.upload_media(data, media_type=mime)
+        media_ids = [media.id]
 
-    response = client_v2.create_tweet(
-        text=text, media_ids=media_ids if media_ids else None
+    tweet = await client.create_tweet(text=text, media_ids=media_ids or None)
+    return tweet.id
+
+
+def post_twitter(text: str, image_path: Optional[str] = None) -> dict:
+    """Post to Twitter/X using username, email, and password (no API key)."""
+    _check_deps("twikit")
+    tweet_id = asyncio.run(
+        _twikit_post(
+            _env("TWITTER_USERNAME", required=True),
+            _env("TWITTER_EMAIL", required=True),
+            _env("TWITTER_PASSWORD", required=True),
+            text,
+            image_path,
+        )
     )
-    tweet_id = response.data["id"]
     log.info("Tweet posted: https://x.com/i/web/status/%s", tweet_id)
     return {
         "platform": "twitter",
@@ -152,253 +173,81 @@ def post_twitter(text: str, image_path: Optional[str] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Reddit — https://www.reddit.com/dev/api/
-# Free for non-commercial: 100 req/min (authenticated).
-# Auth: OAuth 2.0; script-type app for personal bots.
-# ---------------------------------------------------------------------------
-
-def post_reddit(
-    subreddit: str,
-    title: str,
-    text: Optional[str] = None,
-    url: Optional[str] = None,
-    flair_id: Optional[str] = None,
-) -> dict:
-    """Submit a post to a subreddit (text OR link). Returns submission URL."""
-    _check_deps("praw")
-    import praw
-
-    reddit = praw.Reddit(
-        client_id=_env("REDDIT_CLIENT_ID", required=True),
-        client_secret=_env("REDDIT_CLIENT_SECRET", required=True),
-        username=_env("REDDIT_USERNAME", required=True),
-        password=_env("REDDIT_PASSWORD", required=True),
-        user_agent=_env("REDDIT_USER_AGENT") or "una-social-poster/1.0",
-    )
-
-    sub = reddit.subreddit(subreddit)
-    kwargs = {"title": title, "flair_id": flair_id}
-
-    if url:
-        submission = sub.submit_link(**kwargs, url=url)
-    else:
-        submission = sub.submit(**kwargs, selftext=text or "")
-
-    log.info("Reddit post submitted: %s", submission.shortlink)
-    return {
-        "platform": "reddit",
-        "url": submission.shortlink,
-        "id": submission.id,
-    }
-
-
-# ---------------------------------------------------------------------------
-# LinkedIn — https://learn.microsoft.com/en-us/linkedin/
-# Free with "Share on LinkedIn" product (requires manual LinkedIn approval).
-# Auth: OAuth 2.0; scopes: w_member_social or w_organization_social.
-# ---------------------------------------------------------------------------
-
-def post_linkedin(text: str, organization_id: Optional[str] = None) -> dict:
-    """Post to LinkedIn personal profile or organization page."""
-    import requests
-
-    access_token = _env("LINKEDIN_ACCESS_TOKEN", required=True)
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "X-Restli-Protocol-Version": "2.0.0",
-    }
-
-    # Determine author URN
-    if organization_id:
-        author = f"urn:li:organization:{organization_id}"
-    else:
-        person_id = _env("LINKEDIN_PERSON_ID", required=True)
-        author = f"urn:li:person:{person_id}"
-
-    payload = {
-        "author": author,
-        "lifecycleState": "PUBLISHED",
-        "specificContent": {
-            "com.linkedin.ugc.ShareContent": {
-                "shareCommentary": {"text": text},
-                "shareMediaCategory": "NONE",
-            }
-        },
-        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
-    }
-
-    resp = requests.post(
-        "https://api.linkedin.com/v2/ugcPosts",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    post_id = resp.headers.get("x-restli-id", "")
-    log.info("LinkedIn post created: %s", post_id)
-    return {"platform": "linkedin", "post_id": post_id}
-
-
-# ---------------------------------------------------------------------------
-# Facebook Page — https://developers.facebook.com/docs/graph-api/
-# Free with App Review; 200 API calls/hour per account.
-# Auth: Page Access Token (long-lived).
-# ---------------------------------------------------------------------------
-
-def post_facebook(text: str, image_path: Optional[str] = None) -> dict:
-    """Post to a Facebook Page. Returns the post ID."""
-    import requests
-
-    page_id = _env("FACEBOOK_PAGE_ID", required=True)
-    page_token = _env("FACEBOOK_PAGE_ACCESS_TOKEN", required=True)
-
-    if image_path:
-        with open(image_path, "rb") as f:
-            resp = requests.post(
-                f"https://graph.facebook.com/v21.0/{page_id}/photos",
-                data={"caption": text, "access_token": page_token},
-                files={"source": f},
-                timeout=60,
-            )
-    else:
-        resp = requests.post(
-            f"https://graph.facebook.com/v21.0/{page_id}/feed",
-            data={"message": text, "access_token": page_token},
-            timeout=30,
-        )
-
-    resp.raise_for_status()
-    post_id = resp.json().get("id", "")
-    log.info("Facebook post created: %s", post_id)
-    return {"platform": "facebook", "post_id": post_id}
-
-
-# ---------------------------------------------------------------------------
-# Instagram — https://developers.facebook.com/docs/instagram-platform/
-# Free with App Review; requires Business/Creator account linked to FB Page.
-# 100 API-published posts per 24-hour rolling window.
-# Auth: Instagram User Access Token with instagram_content_publish scope.
+# Instagram — instagrapi (unofficial, Instagram private mobile API)
+# No API keys. Logs in with username + password.
+# GitHub: https://github.com/subzeroid/instagrapi  License: MIT
+# NOTE: Instagram feed posts require an image or video — text-only is not
+# supported by the platform itself.
 # ---------------------------------------------------------------------------
 
 def post_instagram(
     caption: str,
-    image_url: str,
-    is_reel: bool = False,
-    video_url: Optional[str] = None,
+    image_path: str,
+    video_path: Optional[str] = None,
 ) -> dict:
-    """
-    Post an image or Reel to Instagram via Graph API.
+    """Post a photo or video to Instagram using username and password."""
+    _check_deps("instagrapi")
+    from instagrapi import Client
 
-    For images, pass a publicly accessible image_url.
-    For Reels, set is_reel=True and pass video_url instead.
-    """
-    import requests
+    if not image_path and not video_path:
+        raise ValueError("Instagram requires an image or video — provide image_path or video_path")
 
-    ig_id = _env("INSTAGRAM_ACCOUNT_ID", required=True)
-    ig_token = _env("INSTAGRAM_ACCESS_TOKEN", required=True)
-    base = f"https://graph.facebook.com/v21.0/{ig_id}"
-
-    # Step 1: Create media container
-    container_params = {"caption": caption, "access_token": ig_token}
-    if is_reel and video_url:
-        container_params["media_type"] = "REELS"
-        container_params["video_url"] = video_url
-    else:
-        container_params["image_url"] = image_url
-
-    resp = requests.post(f"{base}/media", data=container_params, timeout=60)
-    resp.raise_for_status()
-    container_id = resp.json()["id"]
-
-    # Step 2: Poll until container is ready (video processing can take minutes)
-    for attempt in range(20):
-        status = requests.get(
-            f"https://graph.facebook.com/v21.0/{container_id}",
-            params={"fields": "status_code", "access_token": ig_token},
-            timeout=30,
-        ).json()
-        if status.get("status_code") == "FINISHED":
-            break
-        if status.get("status_code") == "ERROR":
-            raise RuntimeError(f"Instagram container error: {status}")
-        time.sleep(15)
-    else:
-        raise TimeoutError("Instagram media container did not finish processing")
-
-    # Step 3: Publish
-    pub = requests.post(
-        f"{base}/media_publish",
-        data={"creation_id": container_id, "access_token": ig_token},
-        timeout=30,
+    cl = Client()
+    cl.login(
+        _env("INSTAGRAM_USERNAME", required=True),
+        _env("INSTAGRAM_PASSWORD", required=True),
     )
-    pub.raise_for_status()
-    media_id = pub.json()["id"]
-    log.info("Instagram post published: %s", media_id)
-    return {"platform": "instagram", "media_id": media_id}
+
+    if video_path:
+        media = cl.video_upload(video_path, caption)
+    else:
+        media = cl.photo_upload(image_path, caption)
+
+    url = f"https://www.instagram.com/p/{media.code}/"
+    log.info("Instagram post published: %s", url)
+    return {"platform": "instagram", "media_id": str(media.id), "url": url}
 
 
 # ---------------------------------------------------------------------------
-# Threads — https://developers.facebook.com/docs/threads/
-# Completely free; 250 posts/day; no per-call charges.
-# Auth: OAuth 2.0 via Meta Developer platform.
+# Threads — threads-net (unofficial, uses Instagram credentials)
+# No API keys. Uses the same username + password as Instagram.
+# PyPI: https://pypi.org/project/threads-net/  License: MIT
 # ---------------------------------------------------------------------------
 
-def post_threads(text: str, image_url: Optional[str] = None) -> dict:
-    """Post to Threads. Returns the published media ID."""
-    import requests
+def post_threads(text: str, image_path: Optional[str] = None) -> dict:
+    """Post to Threads using your Instagram username and password."""
+    _check_deps("threads")
+    from threads import Threads
 
-    threads_id = _env("THREADS_USER_ID", required=True)
-    threads_token = _env("THREADS_ACCESS_TOKEN", required=True)
-    base = f"https://graph.threads.net/v1.0/{threads_id}"
+    username = _env("INSTAGRAM_USERNAME", required=True)
+    password = _env("INSTAGRAM_PASSWORD", required=True)
 
-    # Step 1: Create container
-    container_params = {
-        "text": text,
-        "access_token": threads_token,
-        "media_type": "IMAGE" if image_url else "TEXT",
-    }
-    if image_url:
-        container_params["image_url"] = image_url
+    client = Threads(username=username, password=password)
 
-    resp = requests.post(f"{base}/threads", data=container_params, timeout=30)
-    resp.raise_for_status()
-    container_id = resp.json()["id"]
+    if image_path:
+        post_id = client.private_api.create_thread_item(
+            caption=text,
+            image_path=image_path,
+        )
+    else:
+        post_id = client.private_api.create_thread_item(caption=text)
 
-    # Brief wait for container to be ready
-    time.sleep(3)
-
-    # Step 2: Publish
-    pub = requests.post(
-        f"{base}/threads_publish",
-        data={"creation_id": container_id, "access_token": threads_token},
-        timeout=30,
-    )
-    pub.raise_for_status()
-    media_id = pub.json()["id"]
-    log.info("Threads post published: %s", media_id)
-    return {"platform": "threads", "media_id": media_id}
+    log.info("Threads post created: %s", post_id)
+    return {"platform": "threads", "post_id": str(post_id)}
 
 
 # ---------------------------------------------------------------------------
-# Convenience: post to all configured platforms at once
+# Convenience: broadcast to multiple platforms at once
 # ---------------------------------------------------------------------------
 
 PLATFORM_MAP = {
-    "bluesky": lambda text, image, **kw: post_bluesky(text, image),
-    "mastodon": lambda text, image, **kw: post_mastodon(text, image),
-    "twitter": lambda text, image, **kw: post_twitter(text, image),
-    "reddit": lambda text, image, **kw: post_reddit(
-        kw["subreddit"], kw["title"], text
+    "bluesky": lambda text, img, **kw: post_bluesky(text, img),
+    "mastodon": lambda text, img, **kw: post_mastodon(text, img),
+    "twitter": lambda text, img, **kw: post_twitter(text, img),
+    "instagram": lambda text, img, **kw: post_instagram(
+        text, kw.get("image_path") or img, kw.get("video_path")
     ),
-    "linkedin": lambda text, image, **kw: post_linkedin(text),
-    "facebook": lambda text, image, **kw: post_facebook(text, image),
-    "instagram": lambda text, image, **kw: post_instagram(
-        text, kw["image_url"], kw.get("is_reel", False), kw.get("video_url")
-    ),
-    "threads": lambda text, image, **kw: post_threads(
-        text, kw.get("image_url")
-    ),
+    "threads": lambda text, img, **kw: post_threads(text, img),
 }
 
 
@@ -409,29 +258,26 @@ def post_to_platforms(
     **kwargs,
 ) -> list[dict]:
     """
-    Post text (and optionally an image) to multiple platforms.
+    Post to one or more platforms in sequence.
 
     Args:
-        text:      The post body.
-        platforms: List of platform names to target, e.g. ["bluesky", "mastodon"].
-        image_path: Local file path to an image (optional; not all platforms accept it).
-        **kwargs:  Platform-specific args — see individual post_* functions above.
-                   e.g. subreddit="python", title="...", image_url="https://..."
+        text:       Post body.
+        platforms:  Platform names, e.g. ["bluesky", "mastodon", "twitter"].
+        image_path: Local image file (optional; Instagram requires one).
+        **kwargs:   Extra per-platform args, e.g. video_path="clip.mp4".
 
     Returns:
-        List of result dicts from each platform, each containing at minimum
-        {"platform": "<name>", ...} or {"platform": "<name>", "error": "..."}.
+        List of result dicts: [{"platform": "...", ...}] or [..., "error": "..."}].
     """
     results = []
     for platform in platforms:
         fn = PLATFORM_MAP.get(platform.lower())
         if not fn:
             log.warning("Unknown platform '%s' — skipping.", platform)
-            results.append({"platform": platform, "error": "unsupported platform"})
+            results.append({"platform": platform, "error": "unsupported"})
             continue
         try:
-            result = fn(text, image_path, **kwargs)
-            results.append(result)
+            results.append(fn(text, image_path, **kwargs))
         except Exception as exc:
             log.error("Failed to post to %s: %s", platform, exc)
             results.append({"platform": platform, "error": str(exc)})
@@ -439,7 +285,7 @@ def post_to_platforms(
 
 
 # ---------------------------------------------------------------------------
-# CLI demo
+# CLI
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -448,29 +294,25 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    parser = argparse.ArgumentParser(description="Post to social media platforms")
+    parser = argparse.ArgumentParser(
+        description="Post to social media using account logins only — no API keys required."
+    )
     parser.add_argument("text", help="Post body text")
     parser.add_argument(
         "--platforms",
         nargs="+",
         default=["bluesky"],
-        choices=list(PLATFORM_MAP.keys()),
+        choices=list(PLATFORM_MAP),
         metavar="PLATFORM",
         help=f"Platforms to post to. Choices: {', '.join(PLATFORM_MAP)}",
     )
-    parser.add_argument("--image", help="Local image file path (optional)")
-    parser.add_argument("--subreddit", help="Subreddit name (Reddit only)")
-    parser.add_argument("--title", help="Post title (Reddit only)")
-    parser.add_argument("--image-url", dest="image_url", help="Public image URL (Instagram/Threads)")
+    parser.add_argument("--image", dest="image_path", help="Local image file (optional)")
+    parser.add_argument("--video", dest="video_path", help="Local video file (Instagram only)")
     args = parser.parse_args()
 
     kwargs = {}
-    if args.subreddit:
-        kwargs["subreddit"] = args.subreddit
-    if args.title:
-        kwargs["title"] = args.title
-    if args.image_url:
-        kwargs["image_url"] = args.image_url
+    if args.video_path:
+        kwargs["video_path"] = args.video_path
 
-    results = post_to_platforms(args.text, args.platforms, args.image, **kwargs)
+    results = post_to_platforms(args.text, args.platforms, args.image_path, **kwargs)
     print(json.dumps(results, indent=2))
