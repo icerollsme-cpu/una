@@ -4,3 +4,9 @@ beautifulsoup4>=4.12.2
 lxml>=5.2.0
 openpyxl>=3.1.2
 python-dotenv>=1.0.0
+
+# ── Social media posting (social_poster.py) ───────────────────────────────────
+atproto>=0.0.54          # Bluesky / AT Protocol
+Mastodon.py>=1.8.1       # Mastodon
+tweepy>=4.14.0           # X / Twitter
+praw>=7.7.1              # Reddit
