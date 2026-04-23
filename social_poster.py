@@ -12,16 +12,15 @@ Instagram  instagrapi       username + password           (unofficial)
 Threads    threads-net      Instagram username + password (unofficial)
 Reddit     requests         username + password only (old.reddit.com cookie login)
 LinkedIn   linkedin-api     email + password              (unofficial voyager API)
-TikTok     tiktok-uploader  sessionid cookie from browser (Selenium)
+TikTok     tiktok-uploader  email + password (Selenium)
 
 NOTE: twikit, instagrapi, threads-net, and linkedin-api use unofficial /
 reverse-engineered APIs. They work without paid API registration but may
 violate each platform's ToS and can break if internals change.
 
-TikTok: log in at tiktok.com in Chrome/Firefox → DevTools → Application →
-Cookies → copy the `sessionid` value into TIKTOK_SESSION_ID in your .env.
-tiktok-uploader drives a headless browser, so Chrome + chromedriver must be
-installed.
+TikTok: tiktok-uploader drives a headless browser and logs in with your email
+and password. Chrome + chromedriver (or Firefox + geckodriver) must be
+installed locally.
 """
 
 import asyncio
@@ -361,30 +360,28 @@ def post_linkedin(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# TikTok — tiktok-uploader (Selenium, sessionid cookie from browser)
-# No API registration. Log in to tiktok.com in Chrome/Firefox, then copy the
-# `sessionid` cookie value (DevTools → Application → Cookies) into your .env.
+# TikTok — tiktok-uploader (Selenium, email + password login)
+# No API registration. Drives a headless browser and logs in with your normal
+# TikTok email and password.
 # Requires: Chrome or Firefox + matching chromedriver/geckodriver installed.
 # GitHub: https://github.com/wkaisertexas/tiktok-uploader  License: MIT
 # NOTE: TikTok only supports video posts — images/text-only are not available.
 # ---------------------------------------------------------------------------
 
 def post_tiktok(description: str, video_path: Optional[str] = None) -> dict:
-    """Upload a video to TikTok using your browser sessionid cookie."""
+    """Upload a video to TikTok using email and password."""
     _check_deps("tiktok_uploader")
     from tiktok_uploader.upload import upload_video
 
     if not video_path:
         raise ValueError("TikTok requires a video file — pass video_path or --video")
 
-    session_id = _env("TIKTOK_SESSION_ID", required=True)
-    browser = _env("TIKTOK_BROWSER") or "chrome"
-
     failed = upload_video(
         filename=video_path,
         description=description,
-        sessionid=session_id,
-        browser=browser,
+        username=_env("TIKTOK_EMAIL", required=True),
+        password=_env("TIKTOK_PASSWORD", required=True),
+        browser=_env("TIKTOK_BROWSER") or "chrome",
         headless=True,
         num_retries=2,
     )
