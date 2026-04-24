@@ -4,3 +4,4 @@ beautifulsoup4>=4.12.2
 lxml>=5.2.0
 openpyxl>=3.1.2
 python-dotenv>=1.0.0
+# crawler_agent + sitemap_crawler use only stdlib xml.etree and gzip — no extra deps needed
